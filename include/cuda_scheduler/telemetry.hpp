@@ -7,6 +7,11 @@
 #include <thread>
 #include <condition_variable>
 
+// CUPTI includes
+#include <cupti.h>
+#include <cupti_callbacks.h>
+#include <cupti_driver_cbid.h>
+
 namespace cuda_scheduler {
 
 /**
@@ -121,10 +126,17 @@ private:
     // CUDA profiling helpers
     bool initializeCUPTI();
     void cleanupCUPTI();
+    static void cuptiCallback(void* userdata, CUpti_CallbackDomain domain,
+                             CUpti_CallbackId cbid, const void* cbdata);
     
     // Memory management
     static constexpr size_t MAX_QUEUE_SIZE = 100000;
     void trimQueue();
+    
+    // CUPTI profiling state
+    CUpti_Subscriber cupti_subscriber_;
+    CUpti_EventGroup cupti_event_group_;
+    CUcontext cuda_context_;
 };
 
 } // namespace cuda_scheduler 

@@ -26,6 +26,8 @@ add_library(cuda_scheduler SHARED
     ai_predictor.cpp
     priority_queue.cpp
     performance_monitor.cpp
+    multi_gpu_scheduler.cpp
+    preemption_manager.cpp
     onnx_model.cpp
     utils.cpp
 )
@@ -48,6 +50,7 @@ target_include_directories(cuda_scheduler PUBLIC
 target_link_libraries(cuda_scheduler
     ${CUDA_LIBRARIES}
     Threads::Threads
+    cupti
 )
 
 # Add ONNX Runtime if available

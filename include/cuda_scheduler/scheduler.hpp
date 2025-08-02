@@ -13,6 +13,8 @@ class TelemetryCollector;
 class AIPredictor;
 class PriorityQueue;
 class PerformanceMonitor;
+class MultiGPUScheduler;
+class PreemptionManager;
 
 /**
  * @brief Kernel launch parameters structure
@@ -181,6 +183,8 @@ private:
     std::unique_ptr<AIPredictor> predictor_;
     std::unique_ptr<PriorityQueue> priority_queue_;
     std::unique_ptr<PerformanceMonitor> monitor_;
+    std::unique_ptr<MultiGPUScheduler> multi_gpu_scheduler_;
+    std::unique_ptr<PreemptionManager> preemption_manager_;
     
     // Configuration and state
     SchedulerConfig config_;

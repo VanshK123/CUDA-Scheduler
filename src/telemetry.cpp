@@ -251,20 +251,94 @@ void TelemetryCollector::processProfile(const KernelProfile& profile) {
         current_metrics_.memory_bandwidth_gb_s = profile.memory_bandwidth_gb_s;
     }
     
-    // Additional processing could include:
-    // - Feature extraction for ML models
-    // - Performance trend analysis
-    // - Alert generation for performance issues
 }
 
 bool TelemetryCollector::initializeCUPTI() {
-    // CUPTI initialization would go here
-    // For now, return true to indicate basic telemetry is available
-    return true;
+    try {
+        // CUPTI (CUDA Profiling Tools Interface) initialization
+        // This provides detailed kernel execution profiling
+        
+        // Initialize CUPTI callbacks
+        CUptiResult result = cuptiSubscribe(&cupti_subscriber_, 
+                                          (CUpti_CallbackFunc)cuptiCallback, 
+                                          this);
+        if (result != CUPTI_SUCCESS) {
+            std::cerr << "Failed to subscribe to CUPTI callbacks: " << result << std::endl;
+            return false;
+        }
+        
+        // Enable CUPTI callbacks for kernel launches
+        result = cuptiEnableCallback(1, cupti_subscriber_, 
+                                   CUPTI_CB_DOMAIN_RUNTIME_API, 
+                                   CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernel_v3020);
+        if (result != CUPTI_SUCCESS) {
+            std::cerr << "Failed to enable CUPTI kernel launch callback: " << result << std::endl;
+            return false;
+        }
+        
+        // Enable callbacks for kernel completion
+        result = cuptiEnableCallback(1, cupti_subscriber_, 
+                                   CUPTI_CB_DOMAIN_RUNTIME_API, 
+                                   CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernel_v3020);
+        if (result != CUPTI_SUCCESS) {
+            std::cerr << "Failed to enable CUPTI kernel completion callback: " << result << std::endl;
+            return false;
+        }
+        
+        // Initialize CUPTI event groups for detailed metrics
+        result = cuptiEventGroupCreate(cuda_context_, &cupti_event_group_, 0);
+        if (result != CUPTI_SUCCESS) {
+            std::cerr << "Failed to create CUPTI event group: " << result << std::endl;
+            return false;
+        }
+        
+        // Add events for SM utilization, memory throughput, etc.
+        result = cuptiEventGroupAddEvent(cupti_event_group_, CUPTI_EVENT_ACTIVE_WARPS);
+        if (result != CUPTI_SUCCESS) {
+            std::cerr << "Failed to add CUPTI event: " << result << std::endl;
+            return false;
+        }
+        
+        result = cuptiEventGroupAddEvent(cupti_event_group_, CUPTI_EVENT_ACTIVE_CYCLES);
+        if (result != CUPTI_SUCCESS) {
+            std::cerr << "Failed to add CUPTI event: " << result << std::endl;
+            return false;
+        }
+        
+        // Enable the event group
+        result = cuptiEventGroupEnable(cupti_event_group_);
+        if (result != CUPTI_SUCCESS) {
+            std::cerr << "Failed to enable CUPTI event group: " << result << std::endl;
+            return false;
+        }
+        
+        std::cout << "CUPTI initialized successfully" << std::endl;
+        return true;
+        
+    } catch (const std::exception& e) {
+        std::cerr << "CUPTI initialization failed: " << e.what() << std::endl;
+        return false;
+    }
 }
 
 void TelemetryCollector::cleanupCUPTI() {
-    // CUPTI cleanup would go here
+    try {
+        if (cupti_event_group_) {
+            cuptiEventGroupDisable(cupti_event_group_);
+            cuptiEventGroupDestroy(cupti_event_group_);
+            cupti_event_group_ = nullptr;
+        }
+        
+        if (cupti_subscriber_) {
+            cuptiUnsubscribe(cupti_subscriber_);
+            cupti_subscriber_ = nullptr;
+        }
+        
+        std::cout << "CUPTI cleaned up successfully" << std::endl;
+        
+    } catch (const std::exception& e) {
+        std::cerr << "CUPTI cleanup failed: " << e.what() << std::endl;
+    }
 }
 
 void TelemetryCollector::trimQueue() {
@@ -272,6 +346,52 @@ void TelemetryCollector::trimQueue() {
     
     while (profile_queue_.size() > MAX_QUEUE_SIZE / 2) {
         profile_queue_.pop();
+    }
+}
+
+void TelemetryCollector::cuptiCallback(void* userdata, CUpti_CallbackDomain domain,
+                                      CUpti_CallbackId cbid, const void* cbdata) {
+    TelemetryCollector* collector = static_cast<TelemetryCollector*>(userdata);
+    
+    if (domain == CUPTI_CB_DOMAIN_RUNTIME_API) {
+        const CUpti_CallbackData* callback_data = static_cast<const CUpti_CallbackData*>(cbdata);
+        
+        switch (cbid) {
+            case CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernel_v3020: {
+                if (callback_data->callbackSite == CUPTI_API_ENTER) {
+                    // Kernel launch started
+                    const cudaLaunchKernel_params* params = 
+                        static_cast<const cudaLaunchKernel_params*>(callback_data->functionParams);
+                    
+                    // Extract kernel information
+                    KernelLaunchParams launch_params;
+                    launch_params.func = params->func;
+                    launch_params.grid_dim = params->gridDim;
+                    launch_params.block_dim = params->blockDim;
+                    launch_params.shared_mem_size = params->sharedMem;
+                    launch_params.stream = params->stream;
+                    launch_params.args = params->args;
+                    launch_params.kernel_id = utils::generateKernelId();
+                    launch_params.launch_time = utils::getCurrentTime();
+                    
+                    // Record kernel launch
+                    collector->recordKernelLaunch(launch_params);
+                }
+                break;
+            }
+            
+            case CUPTI_RUNTIME_TRACE_CBID_cudaStreamSynchronize_v3020: {
+                if (callback_data->callbackSite == CUPTI_API_EXIT) {
+                    // Kernel completion detected
+                    // In a real implementation, you'd track kernel completion more precisely
+                    uint64_t kernel_id = 0;  // Would be tracked per kernel
+                    uint64_t execution_time = 0;  // Would be calculated from start time
+                    
+                    collector->recordKernelCompletion(kernel_id, execution_time);
+                }
+                break;
+            }
+        }
     }
 }
 

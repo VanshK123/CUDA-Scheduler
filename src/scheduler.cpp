@@ -1,6 +1,8 @@
 #include "cuda_scheduler/scheduler.hpp"
 #include "cuda_scheduler/telemetry.hpp"
 #include "cuda_scheduler/ai_predictor.hpp"
+#include "cuda_scheduler/multi_gpu_scheduler.hpp"
+#include "cuda_scheduler/preemption.hpp"
 #include <iostream>
 #include <sstream>
 #include <iomanip>
@@ -56,6 +58,22 @@ bool CUDAScheduler::initialize(const SchedulerConfig& config) {
         // Initialize performance monitor
         monitor_ = std::make_unique<PerformanceMonitor>();
         
+        // Initialize multi-GPU scheduler
+        multi_gpu_scheduler_ = std::make_unique<MultiGPUScheduler>();
+        if (!multi_gpu_scheduler_->initialize()) {
+            logMessage(LogLevel::WARNING, "Failed to initialize multi-GPU scheduler, using single GPU mode");
+        } else {
+            logMessage(LogLevel::INFO, "Multi-GPU scheduler initialized successfully");
+        }
+        
+        // Initialize preemption manager
+        preemption_manager_ = std::make_unique<PreemptionManager>();
+        if (!preemption_manager_->initialize()) {
+            logMessage(LogLevel::WARNING, "Failed to initialize preemption manager, preemption disabled");
+        } else {
+            logMessage(LogLevel::INFO, "Preemption manager initialized successfully");
+        }
+        
         logMessage(LogLevel::INFO, "CUDA Scheduler initialized successfully");
         return true;
         
@@ -67,6 +85,11 @@ bool CUDAScheduler::initialize(const SchedulerConfig& config) {
 
 CUresult CUDAScheduler::scheduleKernel(const KernelLaunchParams& params) {
     try {
+        // Register kernel for preemption tracking
+        if (preemption_manager_) {
+            preemption_manager_->registerKernel(params.kernel_id, Priority::NORMAL, true);
+        }
+        
         // Record kernel launch in telemetry
         telemetry_->recordKernelLaunch(params);
         
@@ -256,6 +279,14 @@ void CUDAScheduler::shutdown() {
         
         if (monitor_) {
             monitor_->shutdown();
+        }
+        
+        if (multi_gpu_scheduler_) {
+            multi_gpu_scheduler_->shutdown();
+        }
+        
+        if (preemption_manager_) {
+            preemption_manager_->shutdown();
         }
         
         // Clear any remaining tasks

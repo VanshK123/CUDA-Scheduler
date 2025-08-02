@@ -190,6 +190,7 @@ private:
     
     HardwareContext hardware_context_;
     bool initializeHardwareContext();
+    bool retrainModel(const std::vector<std::vector<float>>& X, const std::vector<float>& y);
 };
 
 } // namespace cuda_scheduler 
