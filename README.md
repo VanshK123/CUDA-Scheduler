@@ -763,7 +763,7 @@ This technical architecture provides a production-ready, high-performance AI-dri
 
 ```bash
 # Clone the repository
-git clone <repository-url>
+git clone https://github.com/VanshK123/CUDA-Scheduler
 cd CUDA-Scheduler
 
 # Create build directory
