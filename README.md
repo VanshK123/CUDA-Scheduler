@@ -719,7 +719,7 @@ This technical architecture provides a production-ready, high-performance AI-dri
 
 ### Performance Results
 
-![Inference Latency Comparison](images/latency_comparison.png)
+![Inference Latency Comparison](images/latency_comparison.png) 
 
 ![Training Throughput Timeline](images/throughput_timeline.png)
 
