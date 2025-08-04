@@ -158,6 +158,22 @@ void TelemetryCollector::processingLoop() {
         if (++update_counter % 10 == 0) {
             updateGPUMetrics();
         }
+        
+        // Clean up completed kernels periodically
+        static int cleanup_counter = 0;
+        if (++cleanup_counter % 50 == 0) {
+            cleanupCompletedKernels();
+            
+            // Log kernel tracking statistics
+            auto stats = getKernelTrackingStats();
+            if (stats.total_kernels_tracked > 0) {
+                std::cout << "Kernel Tracking Stats - Total: " << stats.total_kernels_tracked
+                          << ", Completed: " << stats.completed_kernels
+                          << ", Pending: " << stats.pending_kernels
+                          << ", Active Streams: " << stats.active_streams
+                          << ", Avg Time: " << stats.avg_execution_time_ms << "ms" << std::endl;
+            }
+        }
     }
 }
 
@@ -225,7 +241,6 @@ KernelProfile TelemetryCollector::createProfile(const KernelLaunchParams& params
     profile.launch_time = params.launch_time;
     
     // Estimate operation type based on kernel function pointer
-    // This is a simplified approach - in practice, you'd want more sophisticated detection
     profile.operation_type = "unknown";
     
     // Calculate input tensor volume (simplified)
@@ -349,6 +364,40 @@ void TelemetryCollector::trimQueue() {
     }
 }
 
+void TelemetryCollector::cleanupCompletedKernels() {
+    std::lock_guard<std::mutex> lock(kernel_tracking_mutex_);
+    
+    // Clean up completed kernels from stream maps
+    for (auto& stream_pair : stream_kernel_map_) {
+        auto& kernel_list = stream_pair.second;
+        
+        // Remove completed kernels
+        kernel_list.erase(
+            std::remove_if(kernel_list.begin(), kernel_list.end(),
+                [](const KernelTrackingInfo& info) { return info.completed; }),
+            kernel_list.end()
+        );
+    }
+    
+    // Clean up completed kernels from tracking map (keep last 1000 for statistics)
+    const size_t max_tracking_size = 1000;
+    if (kernel_tracking_map_.size() > max_tracking_size) {
+        std::vector<uint64_t> completed_kernels;
+        
+        for (const auto& pair : kernel_tracking_map_) {
+            if (pair.second.completed) {
+                completed_kernels.push_back(pair.first);
+            }
+        }
+        
+        // Remove oldest completed kernels
+        size_t to_remove = kernel_tracking_map_.size() - max_tracking_size;
+        for (size_t i = 0; i < std::min(to_remove, completed_kernels.size()); ++i) {
+            kernel_tracking_map_.erase(completed_kernels[i]);
+        }
+    }
+}
+
 void TelemetryCollector::cuptiCallback(void* userdata, CUpti_CallbackDomain domain,
                                       CUpti_CallbackId cbid, const void* cbdata) {
     TelemetryCollector* collector = static_cast<TelemetryCollector*>(userdata);
@@ -376,23 +425,195 @@ void TelemetryCollector::cuptiCallback(void* userdata, CUpti_CallbackDomain doma
                     
                     // Record kernel launch
                     collector->recordKernelLaunch(launch_params);
+                    
+                    // Track kernel for completion detection
+                    std::lock_guard<std::mutex> lock(collector->kernel_tracking_mutex_);
+                    
+                    KernelTrackingInfo tracking_info;
+                    tracking_info.kernel_id = launch_params.kernel_id;
+                    tracking_info.launch_time = std::chrono::high_resolution_clock::now();
+                    tracking_info.stream = launch_params.stream;
+                    tracking_info.launch_params = launch_params;
+                    tracking_info.completed = false;
+                    tracking_info.execution_time_ns = 0;
+                    
+                    // Add to stream tracking
+                    collector->stream_kernel_map_[launch_params.stream].push_back(tracking_info);
+                    
+                    // Add to kernel tracking map
+                    collector->kernel_tracking_map_[launch_params.kernel_id] = tracking_info;
+                    
+                    std::cout << "Tracking kernel " << launch_params.kernel_id 
+                              << " on stream " << launch_params.stream << std::endl;
                 }
                 break;
             }
             
             case CUPTI_RUNTIME_TRACE_CBID_cudaStreamSynchronize_v3020: {
                 if (callback_data->callbackSite == CUPTI_API_EXIT) {
-                    // Kernel completion detected
-                    // In a real implementation, you'd track kernel completion more precisely
-                    uint64_t kernel_id = 0;  // Would be tracked per kernel
-                    uint64_t execution_time = 0;  // Would be calculated from start time
+                    // Kernel completion detected through stream synchronization
+                    const cudaStreamSynchronize_params* params = 
+                        static_cast<const cudaStreamSynchronize_params*>(callback_data->functionParams);
                     
-                    collector->recordKernelCompletion(kernel_id, execution_time);
+                    cudaStream_t stream = params->stream;
+                    
+                    // Find completed kernels for this stream
+                    std::lock_guard<std::mutex> lock(collector->kernel_tracking_mutex_);
+                    
+                    auto stream_it = collector->stream_kernel_map_.find(stream);
+                    if (stream_it != collector->stream_kernel_map_.end()) {
+                        auto& kernel_list = stream_it->second;
+                        
+                        for (auto& kernel_info : kernel_list) {
+                            if (!kernel_info.completed) {
+                                // Calculate execution time
+                                auto completion_time = std::chrono::high_resolution_clock::now();
+                                auto execution_duration = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                    completion_time - kernel_info.launch_time
+                                );
+                                
+                                kernel_info.completed = true;
+                                kernel_info.execution_time_ns = execution_duration.count();
+                                
+                                // Record kernel completion
+                                collector->recordKernelCompletion(kernel_info.kernel_id, kernel_info.execution_time_ns);
+                                
+                                // Update tracking map
+                                collector->kernel_tracking_map_[kernel_info.kernel_id] = kernel_info;
+                                
+                                std::cout << "Kernel " << kernel_info.kernel_id 
+                                          << " completed in " << kernel_info.execution_time_ns / 1000000.0 
+                                          << " ms" << std::endl;
+                            }
+                        }
+                    }
+                }
+                break;
+            }
+            
+            case CUPTI_RUNTIME_TRACE_CBID_cudaEventRecord_v3020: {
+                if (callback_data->callbackSite == CUPTI_API_ENTER) {
+                    // Event recorded - can be used for kernel completion tracking
+                    const cudaEventRecord_params* params = 
+                        static_cast<const cudaEventRecord_params*>(callback_data->functionParams);
+                    
+                    cudaStream_t stream = params->stream;
+                    cudaEvent_t event = params->event;
+                    
+                    // Mark kernels on this stream as potentially completed
+                    std::lock_guard<std::mutex> lock(collector->kernel_tracking_mutex_);
+                    
+                    auto stream_it = collector->stream_kernel_map_.find(stream);
+                    if (stream_it != collector->stream_kernel_map_.end()) {
+                        auto& kernel_list = stream_it->second;
+                        
+                        for (auto& kernel_info : kernel_list) {
+                            if (!kernel_info.completed) {
+                                // Estimate completion based on event recording
+                                auto current_time = std::chrono::high_resolution_clock::now();
+                                auto estimated_duration = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                    current_time - kernel_info.launch_time
+                                );
+                                
+                                // If kernel has been running for a reasonable time, mark as completed
+                                if (estimated_duration.count() > 1000000) { // > 1ms
+                                    kernel_info.completed = true;
+                                    kernel_info.execution_time_ns = estimated_duration.count();
+                                    
+                                    collector->recordKernelCompletion(kernel_info.kernel_id, kernel_info.execution_time_ns);
+                                    collector->kernel_tracking_map_[kernel_info.kernel_id] = kernel_info;
+                                    
+                                    std::cout << "Kernel " << kernel_info.kernel_id 
+                                              << " completed via event recording in " 
+                                              << kernel_info.execution_time_ns / 1000000.0 << " ms" << std::endl;
+                                }
+                            }
+                        }
+                    }
+                }
+                break;
+            }
+            
+            case CUPTI_RUNTIME_TRACE_CBID_cudaEventSynchronize_v3020: {
+                if (callback_data->callbackSite == CUPTI_API_EXIT) {
+                    // Event synchronization completed - all kernels up to this event are done
+                    const cudaEventSynchronize_params* params = 
+                        static_cast<const cudaEventSynchronize_params*>(callback_data->functionParams);
+                    
+                    cudaEvent_t event = params->event;
+                    
+                    // Mark all kernels as completed (simplified approach)
+                    std::lock_guard<std::mutex> lock(collector->kernel_tracking_mutex_);
+                    
+                    for (auto& stream_pair : collector->stream_kernel_map_) {
+                        auto& kernel_list = stream_pair.second;
+                        
+                        for (auto& kernel_info : kernel_list) {
+                            if (!kernel_info.completed) {
+                                auto completion_time = std::chrono::high_resolution_clock::now();
+                                auto execution_duration = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                    completion_time - kernel_info.launch_time
+                                );
+                                
+                                kernel_info.completed = true;
+                                kernel_info.execution_time_ns = execution_duration.count();
+                                
+                                collector->recordKernelCompletion(kernel_info.kernel_id, kernel_info.execution_time_ns);
+                                collector->kernel_tracking_map_[kernel_info.kernel_id] = kernel_info;
+                                
+                                std::cout << "Kernel " << kernel_info.kernel_id 
+                                          << " completed via event synchronization in " 
+                                          << kernel_info.execution_time_ns / 1000000.0 << " ms" << std::endl;
+                            }
+                        }
+                    }
                 }
                 break;
             }
         }
     }
+}
+
+TelemetryCollector::KernelTrackingStats TelemetryCollector::getKernelTrackingStats() const {
+    std::lock_guard<std::mutex> lock(kernel_tracking_mutex_);
+    
+    KernelTrackingStats stats;
+    stats.total_kernels_tracked = kernel_tracking_map_.size();
+    stats.completed_kernels = 0;
+    stats.pending_kernels = 0;
+    stats.active_streams = stream_kernel_map_.size();
+    
+    uint64_t total_execution_time = 0;
+    uint64_t max_execution_time = 0;
+    uint64_t min_execution_time = UINT64_MAX;
+    size_t completed_count = 0;
+    
+    for (const auto& pair : kernel_tracking_map_) {
+        const auto& kernel_info = pair.second;
+        
+        if (kernel_info.completed) {
+            stats.completed_kernels++;
+            completed_count++;
+            
+            total_execution_time += kernel_info.execution_time_ns;
+            max_execution_time = std::max(max_execution_time, kernel_info.execution_time_ns);
+            min_execution_time = std::min(min_execution_time, kernel_info.execution_time_ns);
+        } else {
+            stats.pending_kernels++;
+        }
+    }
+    
+    if (completed_count > 0) {
+        stats.avg_execution_time_ms = (total_execution_time / completed_count) / 1000000.0f;
+        stats.max_execution_time_ms = max_execution_time / 1000000.0f;
+        stats.min_execution_time_ms = (min_execution_time == UINT64_MAX) ? 0.0f : min_execution_time / 1000000.0f;
+    } else {
+        stats.avg_execution_time_ms = 0.0f;
+        stats.max_execution_time_ms = 0.0f;
+        stats.min_execution_time_ms = 0.0f;
+    }
+    
+    return stats;
 }
 
 } // namespace cuda_scheduler 

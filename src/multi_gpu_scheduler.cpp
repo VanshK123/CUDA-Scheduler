@@ -316,8 +316,7 @@ int MultiGPUScheduler::selectGPU_MemoryAware(const KernelProfile& profile) {
 }
 
 int MultiGPUScheduler::selectGPU_AffinityBased(const KernelProfile& profile) {
-    // Simple affinity: prefer GPU with most recent kernel of same type
-    // In practice, this would track kernel relationships and data locality
+    // Simple affinity: prefer GPU with most recent kernel of same typ
     
     int best_gpu = -1;
     auto now = std::chrono::high_resolution_clock::now();

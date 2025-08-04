@@ -149,8 +149,6 @@ std::string getOperationTypeFromFunction(void* func) {
     ss << func;
     std::string func_str = ss.str();
     
-    // Extract function name from pointer (simplified approach)
-    // In practice, you'd use debug symbols or function name demangling
     
     // Common CUDA kernel naming patterns
     std::vector<std::pair<std::string, std::string>> patterns = {

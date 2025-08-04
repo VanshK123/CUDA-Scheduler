@@ -440,15 +440,185 @@ bool PreemptionManager::isKernelExpired(uint64_t kernel_id) const {
 }
 
 void PreemptionManager::restoreKernelContext(uint64_t kernel_id) {
-    // In a real implementation, this would restore CUDA context state
-    // For now, we'll just log the restoration
-    std::cout << "Restoring context for kernel " << kernel_id << std::endl;
+    auto it = kernel_contexts_.find(kernel_id);
+    if (it == kernel_contexts_.end()) {
+        std::cerr << "Warning: No context found for kernel " << kernel_id << std::endl;
+        return;
+    }
+
+    PreemptionContext& context = it->second;
+    
+    // Restore CUDA context
+    CUresult result = cuCtxSetCurrent(context.saved_context);
+    if (result != CUDA_SUCCESS) {
+        std::cerr << "Failed to restore CUDA context for kernel " << kernel_id 
+                  << ": " << getCUDAErrorString(result) << std::endl;
+        return;
+    }
+
+    // Restore kernel parameters
+    if (context.kernel_function) {
+        // Restore grid and block dimensions
+        dim3 grid_dim = context.saved_grid_dim;
+        dim3 block_dim = context.saved_block_dim;
+        
+        // Restore shared memory size
+        size_t shared_mem = context.saved_shared_mem;
+        
+        // Restore kernel arguments
+        void** args = context.saved_kernel_args.data();
+        
+        // Restore stream
+        cudaStream_t stream = context.saved_stream;
+        
+        // Launch the kernel with restored parameters
+        cudaError_t launch_result = cudaLaunchKernel(
+            context.kernel_function,
+            grid_dim, block_dim,
+            args, shared_mem, stream
+        );
+        
+        if (launch_result != cudaSuccess) {
+            std::cerr << "Failed to relaunch kernel " << kernel_id 
+                      << ": " << cudaGetErrorString(launch_result) << std::endl;
+        } else {
+            std::cout << "Successfully restored and relaunched kernel " << kernel_id << std::endl;
+        }
+    }
+
+    // Restore memory state if needed
+    if (!context.saved_memory_regions.empty()) {
+        for (const auto& mem_region : context.saved_memory_regions) {
+            // Restore memory content if it was modified
+            if (mem_region.needs_restore) {
+                cudaError_t mem_result = cudaMemcpy(
+                    mem_region.device_ptr,
+                    mem_region.host_backup.data(),
+                    mem_region.size,
+                    cudaMemcpyHostToDevice
+                );
+                
+                if (mem_result != cudaSuccess) {
+                    std::cerr << "Failed to restore memory region for kernel " << kernel_id 
+                              << ": " << cudaGetErrorString(mem_result) << std::endl;
+                }
+            }
+        }
+    }
+
+    // Update statistics
+    context.restore_count++;
+    context.last_restore_time = std::chrono::steady_clock::now();
+    
+    // Mark as no longer preempted
+    context.is_preempted = false;
+    context.preemption_end_time = std::chrono::steady_clock::now();
+    
+    // Calculate preemption duration
+    auto preemption_duration = std::chrono::duration_cast<std::chrono::microseconds>(
+        context.preemption_end_time - context.preemption_start_time
+    );
+    context.total_preemption_time += preemption_duration;
+    
+    std::cout << "Restored context for kernel " << kernel_id 
+              << " (preemption duration: " << preemption_duration.count() << "μs)" << std::endl;
 }
 
 void PreemptionManager::saveKernelContext(uint64_t kernel_id) {
-    // In a real implementation, this would save CUDA context state
-    // For now, we'll just log the save
-    std::cout << "Saving context for kernel " << kernel_id << std::endl;
+    auto it = kernel_contexts_.find(kernel_id);
+    if (it == kernel_contexts_.end()) {
+        std::cerr << "Warning: No context found for kernel " << kernel_id << std::endl;
+        return;
+    }
+
+    PreemptionContext& context = it->second;
+    
+    // Save current CUDA context
+    CUcontext current_context;
+    CUresult result = cuCtxGetCurrent(&current_context);
+    if (result == CUDA_SUCCESS) {
+        context.saved_context = current_context;
+    } else {
+        std::cerr << "Failed to get current CUDA context for kernel " << kernel_id 
+                  << ": " << getCUDAErrorString(result) << std::endl;
+    }
+
+    // Save kernel execution state
+    if (context.kernel_function) {
+        // Save grid and block dimensions
+        context.saved_grid_dim = context.current_grid_dim;
+        context.saved_block_dim = context.current_block_dim;
+        
+        // Save shared memory size
+        context.saved_shared_mem = context.current_shared_mem;
+        
+        // Save kernel arguments (deep copy)
+        context.saved_kernel_args = context.current_kernel_args;
+        
+        // Save stream
+        context.saved_stream = context.current_stream;
+        
+        // Mark that we have saved kernel parameters
+        context.saved_kernel_params = true;
+    }
+
+    // Save critical memory regions
+    if (!context.memory_regions.empty()) {
+        context.saved_memory_regions.clear();
+        
+        for (const auto& mem_region : context.memory_regions) {
+            SavedMemoryRegion saved_region;
+            saved_region.device_ptr = mem_region.device_ptr;
+            saved_region.size = mem_region.size;
+            saved_region.needs_restore = mem_region.is_critical;
+            
+            // Create host backup for critical memory regions
+            if (mem_region.is_critical) {
+                saved_region.host_backup.resize(mem_region.size);
+                
+                cudaError_t mem_result = cudaMemcpy(
+                    saved_region.host_backup.data(),
+                    mem_region.device_ptr,
+                    mem_region.size,
+                    cudaMemcpyDeviceToHost
+                );
+                
+                if (mem_result != cudaSuccess) {
+                    std::cerr << "Failed to backup memory region for kernel " << kernel_id 
+                              << ": " << cudaGetErrorString(mem_result) << std::endl;
+                    saved_region.needs_restore = false;
+                }
+            }
+            
+            context.saved_memory_regions.push_back(saved_region);
+        }
+    }
+
+    // Save execution progress
+    context.saved_progress = context.current_progress;
+    context.saved_execution_time = context.current_execution_time;
+    
+    // Mark as preempted
+    context.is_preempted = true;
+    context.preemption_start_time = std::chrono::steady_clock::now();
+    
+    // Update statistics
+    context.save_count++;
+    context.last_save_time = std::chrono::steady_clock::now();
+    
+    std::cout << "Saved context for kernel " << kernel_id 
+              << " (progress: " << context.saved_progress << "%)" << std::endl;
+}
+
+std::string PreemptionManager::getCUDAErrorString(CUresult result) {
+    const char* error_string = nullptr;
+    cuGetErrorString(result, &error_string);
+    
+    if (error_string) {
+        return std::string(error_string);
+    } else {
+        return "Unknown CUDA error: " + std::to_string(static_cast<int>(result));
+    }
 }
 
 } // namespace cuda_scheduler 

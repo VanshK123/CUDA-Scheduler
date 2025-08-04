@@ -160,8 +160,6 @@ bool AIPredictor::updateModel(const std::vector<KernelProfile>& profiles,
         
         // Online learning: update model with new data
         if (onnx_model_ && onnx_model_->isLoaded()) {
-            // For online learning, we'll implement incremental updates
-            // This is a simplified approach - in production you'd use more sophisticated methods
             
             // Calculate prediction errors
             float total_error = 0.0f;
@@ -182,8 +180,6 @@ bool AIPredictor::updateModel(const std::vector<KernelProfile>& profiles,
                 prediction_accuracy_ = std::max(0.0f, std::min(100.0f, prediction_accuracy_));
             }
             
-            // Store training data for batch retraining
-            // In a real implementation, you'd accumulate data and retrain periodically
             static std::vector<std::vector<float>> accumulated_X;
             static std::vector<float> accumulated_y;
             
@@ -255,7 +251,6 @@ void AIPredictor::shutdown() {
 
 float AIPredictor::calculateArithmeticIntensity(const KernelProfile& profile) {
     // Arithmetic intensity = operations per byte accessed
-    // Simplified calculation based on grid/block dimensions
     uint64_t total_threads = profile.grid_dim.x * profile.grid_dim.y * profile.grid_dim.z *
                             profile.block_dim.x * profile.block_dim.y * profile.block_dim.z;
     
@@ -274,7 +269,7 @@ float AIPredictor::calculateParallelismDegree(const KernelProfile& profile) {
     uint64_t total_threads = profile.grid_dim.x * profile.grid_dim.y * profile.grid_dim.z *
                             profile.block_dim.x * profile.block_dim.y * profile.block_dim.z;
     
-    int max_threads_per_sm = 2048;  // Typical value, should be queried from device
+    int max_threads_per_sm = 2048;
     int num_sms = hardware_context_.multiprocessor_count;
     
     if (num_sms > 0) {

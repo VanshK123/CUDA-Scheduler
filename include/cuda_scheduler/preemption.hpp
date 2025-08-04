@@ -1,6 +1,9 @@
 #pragma once
 
 #include "scheduler.hpp"
+#include <cuda.h>
+#include <cuda_runtime.h>
+#include <vector>
 #include <queue>
 #include <unordered_map>
 #include <atomic>
@@ -49,9 +52,64 @@ struct PreemptionContext {
     size_t checkpoint_count;
     float execution_progress;  // 0.0 to 1.0
     
+    // CUDA context and kernel information
+    CUcontext saved_context;
+    void* kernel_function;
+    dim3 current_grid_dim;
+    dim3 current_block_dim;
+    size_t current_shared_mem;
+    std::vector<void*> current_kernel_args;
+    cudaStream_t current_stream;
+    
+    // Saved kernel parameters
+    dim3 saved_grid_dim;
+    dim3 saved_block_dim;
+    size_t saved_shared_mem;
+    std::vector<void*> saved_kernel_args;
+    cudaStream_t saved_stream;
+    bool saved_kernel_params;
+    
+    // Memory regions
+    struct MemoryRegion {
+        void* device_ptr;
+        size_t size;
+        bool is_critical;
+    };
+    std::vector<MemoryRegion> memory_regions;
+    
+    struct SavedMemoryRegion {
+        void* device_ptr;
+        size_t size;
+        bool needs_restore;
+        std::vector<uint8_t> host_backup;
+    };
+    std::vector<SavedMemoryRegion> saved_memory_regions;
+    
+    // Progress tracking
+    float current_progress;
+    float saved_progress;
+    std::chrono::steady_clock::duration current_execution_time;
+    std::chrono::steady_clock::duration saved_execution_time;
+    
+    // Preemption timing
+    std::chrono::steady_clock::time_point preemption_start_time;
+    std::chrono::steady_clock::time_point preemption_end_time;
+    std::chrono::steady_clock::duration total_preemption_time;
+    
+    // Statistics
+    size_t save_count;
+    size_t restore_count;
+    std::chrono::steady_clock::time_point last_save_time;
+    std::chrono::steady_clock::time_point last_restore_time;
+    
     PreemptionContext() : kernel_id(0), original_priority(Priority::NORMAL), 
                          current_priority(Priority::NORMAL), is_preemptible(false),
-                         is_preempted(false), checkpoint_count(0), execution_progress(0.0f) {}
+                         is_preempted(false), checkpoint_count(0), execution_progress(0.0f),
+                         saved_context(nullptr), kernel_function(nullptr), current_shared_mem(0),
+                         current_stream(nullptr), saved_shared_mem(0), saved_stream(nullptr),
+                         saved_kernel_params(false), current_progress(0.0f), saved_progress(0.0f),
+                         total_preemption_time(std::chrono::steady_clock::duration::zero()),
+                         save_count(0), restore_count(0) {}
 };
 
 /**
@@ -209,6 +267,7 @@ private:
     bool isKernelExpired(uint64_t kernel_id) const;
     void restoreKernelContext(uint64_t kernel_id);
     void saveKernelContext(uint64_t kernel_id);
+    std::string getCUDAErrorString(CUresult result);
 };
 
 } // namespace cuda_scheduler 

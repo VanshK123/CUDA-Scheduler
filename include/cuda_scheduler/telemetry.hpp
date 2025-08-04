@@ -6,6 +6,8 @@
 #include <mutex>
 #include <thread>
 #include <condition_variable>
+#include <unordered_map>
+#include <chrono>
 
 // CUPTI includes
 #include <cupti.h>
@@ -89,6 +91,22 @@ public:
     bool isCollectionEnabled() const;
     
     /**
+     * @brief Get kernel tracking statistics
+     * @return Statistics about tracked kernels
+     */
+    struct KernelTrackingStats {
+        size_t total_kernels_tracked;
+        size_t completed_kernels;
+        size_t pending_kernels;
+        size_t active_streams;
+        float avg_execution_time_ms;
+        float max_execution_time_ms;
+        float min_execution_time_ms;
+    };
+    
+    KernelTrackingStats getKernelTrackingStats() const;
+    
+    /**
      * @brief Clear collected data
      */
     void clearData();
@@ -99,6 +117,10 @@ public:
     void shutdown();
 
 private:
+    /**
+     * @brief Clean up completed kernels from tracking maps
+     */
+    void cleanupCompletedKernels();
     // Collection state
     std::atomic<bool> collection_enabled_{true};
     std::queue<KernelProfile> profile_queue_;
@@ -137,6 +159,22 @@ private:
     CUpti_Subscriber cupti_subscriber_;
     CUpti_EventGroup cupti_event_group_;
     CUcontext cuda_context_;
+    
+    // Kernel tracking
+    struct KernelTrackingInfo {
+        uint64_t kernel_id;
+        std::chrono::high_resolution_clock::time_point launch_time;
+        cudaStream_t stream;
+        KernelLaunchParams launch_params;
+        bool completed;
+        uint64_t execution_time_ns;
+        
+        KernelTrackingInfo() : kernel_id(0), stream(nullptr), completed(false), execution_time_ns(0) {}
+    };
+    
+    std::unordered_map<cudaStream_t, std::vector<KernelTrackingInfo>> stream_kernel_map_;
+    std::unordered_map<uint64_t, KernelTrackingInfo> kernel_tracking_map_;
+    mutable std::mutex kernel_tracking_mutex_;
 };
 
 } // namespace cuda_scheduler 
