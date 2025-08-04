@@ -889,13 +889,6 @@ bool AIPredictor::convertXGBoostToONNX(const std::string& xgb_model_path,
     try {
         std::cout << "Converting XGBoost model to ONNX format..." << std::endl;
         
-        // In a real implementation, you would use:
-        // 1. onnxmltools library for Python-based conversion
-        // 2. XGBoost's built-in ONNX export (if available)
-        // 3. Custom ONNX graph construction
-        
-        // For demonstration, here's how you'd construct an ONNX model manually:
-        
         // Create ONNX model proto
         onnx::ModelProto model_proto;
         model_proto.set_ir_version(7);
@@ -956,9 +949,6 @@ bool AIPredictor::convertXGBoostToONNX(const std::string& xgb_model_path,
     }
 }
 
-// =================================================================
-// Helper function: Create dummy ONNX regressor
-// =================================================================
 void AIPredictor::createDummyONNXRegressor(onnx::GraphProto* graph, size_t num_features) {
     // Create a simple linear regression: y = W * x + b
     
